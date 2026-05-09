@@ -1,17 +1,10 @@
 import { createServer } from 'node:http';
-import { PassThrough, Readable, Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { setDefaultResultOrder } from "node:dns";
 
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-const PUBLIC_RELAY_PATH = normalizeRelayPath(process.env.PUBLIC_RELAY_PATH || "/api");
-const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "/relay");
-const RELAY_KEY = (process.env.RELAY_KEY || "").trim();
-
-const MAX_INFLIGHT = 128;
-const UPSTREAM_TIMEOUT_MS = 30000;
-
-let inFlight = 0;
+const PUBLIC_RELAY_PATH = normalizeRelayPath(process.env.PUBLIC_RELAY_PATH || "/digimamad");
+const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "/");
 
 function normalizeRelayPath(rawPath) {
   if (!rawPath) return "";
@@ -29,11 +22,6 @@ function normalizeIncomingPath(pathname) {
 }
 
 async function handler(req, res) {
-  if (!TARGET_BASE) {
-    res.statusCode = 500;
-    return res.end("TARGET_DOMAIN is not set");
-  }
-
   try {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `https://${host}`);
@@ -44,58 +32,48 @@ async function handler(req, res) {
       return res.end("Not Found");
     }
 
-    const upstreamPath = normalizedPath.replace(PUBLIC_RELAY_PATH, RELAY_PATH || "");
-
-    if (RELAY_KEY) {
-      const token = (req.headers["x-relay-key"] || "").toString().trim();
-      if (token !== RELAY_KEY) {
-        res.statusCode = 403;
-        return res.end("Forbidden");
-      }
-    }
-
-    if (inFlight >= MAX_INFLIGHT) {
-      res.statusCode = 503;
-      return res.end("Server Busy");
-    }
-    inFlight++;
+    const upstreamPath = normalizedPath === PUBLIC_RELAY_PATH 
+      ? RELAY_PATH 
+      : normalizedPath.replace(PUBLIC_RELAY_PATH, RELAY_PATH || "");
 
     const targetUrl = `${TARGET_BASE}${upstreamPath}${url.search || ""}`;
 
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers.connection;
-    delete headers["x-relay-key"];
+    const headers = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      const lower = key.toLowerCase();
+      if (["host", "connection", "x-relay-key"].includes(lower)) continue;
+      headers[lower] = value;
+    }
 
     const upstream = await fetch(targetUrl, {
       method: req.method,
-      headers,
-      body: req.method !== "GET" && req.method !== "HEAD" ? req : undefined,
+      headers: headers,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : req,
       duplex: "half",
       redirect: "manual",
     });
 
     res.statusCode = upstream.status;
+
     for (const [key, value] of upstream.headers) {
-      if (!["connection", "transfer-encoding"].includes(key.toLowerCase())) {
+      const lower = key.toLowerCase();
+      if (!["connection", "transfer-encoding", "keep-alive"].includes(lower)) {
         res.setHeader(key, value);
       }
     }
 
     if (upstream.body) {
-      const reader = Readable.fromWeb(upstream.body);
-      await pipeline(reader, res);
+      await pipeline(Readable.fromWeb(upstream.body), res);
     } else {
       res.end();
     }
 
   } catch (err) {
+    console.error("Relay Error:", err.message);
     if (!res.headersSent) {
       res.statusCode = 502;
       res.end("Bad Gateway");
     }
-  } finally {
-    inFlight = Math.max(0, inFlight - 1);
   }
 }
 
@@ -103,5 +81,5 @@ const server = createServer(handler);
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 XHTTP Relay running on port ${PORT}`);
+  console.log(`🚀 XHTTP Relay running on port ${PORT} | Target: ${TARGET_BASE}`);
 });
