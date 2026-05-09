@@ -7,48 +7,42 @@ const PUBLIC_RELAY_PATH = normalizeRelayPath(process.env.PUBLIC_RELAY_PATH || "/
 const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "/");
 
 function normalizeRelayPath(rawPath) {
-  if (!rawPath || rawPath === "") return "/";
-  let path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-  if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-  return path;
+  if (!rawPath) return "/";
+  let p = rawPath.startsWith("/") ? rawPath : "/" + rawPath;
+  return p.replace(/\/$/, "") || "/";
 }
 
 async function handler(req, res) {
-  const requestPath = req.url || "/";
-  
-  console.log(`[${new Date().toISOString()}] Request: ${requestPath} | PUBLIC_PATH: ${PUBLIC_RELAY_PATH}`);
+  const fullUrl = req.url || "/";
+  console.log(`[${new Date().toISOString()}] Request: ${fullUrl}`);
 
   try {
-    const host = req.headers.host || "localhost";
-    const url = new URL(requestPath, `https://${host}`);
-    let pathname = url.pathname;
+    const url = new URL(fullUrl, `https://${req.headers.host}`);
+    let pathname = url.pathname || "/";
 
-    // لاگ دقیق‌تر
-    console.log(`Pathname: ${pathname} | Should match: ${PUBLIC_RELAY_PATH}`);
+    console.log(`Pathname received: "${pathname}" | Configured Public Path: "${PUBLIC_RELAY_PATH}"`);
 
-    // چک مسیر (حساسیت کمتر)
+    // شرط خیلی宽容 (宽松)
     if (pathname !== PUBLIC_RELAY_PATH && 
-        !pathname.startsWith(PUBLIC_RELAY_PATH + "/") && 
-        !(PUBLIC_RELAY_PATH === "/" && pathname.startsWith("/"))) {
+        !pathname.startsWith(PUBLIC_RELAY_PATH + "/")) {
       
+      console.log("❌ 404 - Path did not match");
       res.statusCode = 404;
-      console.log(`404 - Path not matched`);
       return res.end("Not Found");
     }
 
-    // ساخت مسیر هدف
-    let upstreamPath = pathname.replace(PUBLIC_RELAY_PATH, RELAY_PATH);
-    if (upstreamPath === "" || upstreamPath === "//") upstreamPath = "/";
+    // ساخت مسیر برای تارگت
+    let upstreamPath = pathname.replace(PUBLIC_RELAY_PATH, RELAY_PATH || "");
+    if (!upstreamPath || upstreamPath === "") upstreamPath = "/";
 
     const targetUrl = `${TARGET_BASE}${upstreamPath}${url.search || ""}`;
-    console.log(`Proxying to → ${targetUrl}`);
+    console.log(`✅ Proxying to: ${targetUrl}`);
 
-    const headers = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      const lower = key.toLowerCase();
-      if (["host", "connection", "x-relay-key", "accept-encoding"].includes(lower)) continue;
-      headers[lower] = value;
-    }
+    const headers = Object.fromEntries(
+      Object.entries(req.headers).filter(([k]) => 
+        !["host", "connection", "x-relay-key"].includes(k.toLowerCase())
+      )
+    );
 
     const upstream = await fetch(targetUrl, {
       method: req.method,
@@ -58,13 +52,12 @@ async function handler(req, res) {
       redirect: "manual",
     });
 
-    console.log(`Upstream responded with status: ${upstream.status}`);
+    console.log(`Upstream Status: ${upstream.status}`);
 
     res.statusCode = upstream.status;
 
     for (const [key, value] of upstream.headers) {
-      const lower = key.toLowerCase();
-      if (!["connection", "transfer-encoding", "keep-alive"].includes(lower)) {
+      if (!["connection", "transfer-encoding"].includes(key.toLowerCase())) {
         res.setHeader(key, value);
       }
     }
@@ -88,5 +81,5 @@ const server = createServer(handler);
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Relay Started | Target: ${TARGET_BASE} | Public Path: ${PUBLIC_RELAY_PATH}`);
+  console.log(`🚀 Relay Started | Target: ${TARGET_BASE} | Public: ${PUBLIC_RELAY_PATH}`);
 });
