@@ -6,8 +6,8 @@ import { setDefaultResultOrder } from "node:dns";
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 const UPSTREAM_DNS_ORDER = (process.env.UPSTREAM_DNS_ORDER || "ipv4first").trim().toLowerCase();
 const PLATFORM_HEADER_PREFIX = `x-${String.fromCharCode(118, 101, 114, 99, 101, 108)}-`;
-const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "/relay");
-const PUBLIC_RELAY_PATH = normalizeRelayPath(process.env.PUBLIC_RELAY_PATH || "/");
+const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "");
+const PUBLIC_RELAY_PATH = normalizeRelayPath(process.env.PUBLIC_RELAY_PATH || "/api");
 const RELAY_KEY = (process.env.RELAY_KEY || "").trim();
 const UPSTREAM_TIMEOUT_MS = parsePositiveInt(process.env.UPSTREAM_TIMEOUT_MS, 25000, 1000);
 const MAX_INFLIGHT = parsePositiveInt(process.env.MAX_INFLIGHT, 128, 1);
@@ -40,25 +40,33 @@ async function handler(req, res) {
     res.statusCode = 500;
     return res.end("Misconfigured: TARGET_DOMAIN is not set");
   }
-  if (!RELAY_PATH || RELAY_PATH === "/") {
+  if (!RELAY_PATH) {
     res.statusCode = 500;
-    return res.end("Misconfigured: RELAY_PATH is invalid");
+    return res.end("Misconfigured: RELAY_PATH is not set");
+  }
+  if (RELAY_PATH === "/") {
+    res.statusCode = 500;
+    return res.end("Misconfigured: RELAY_PATH cannot be '/'");
   }
   if (!PUBLIC_RELAY_PATH) {
     res.statusCode = 500;
     return res.end("Misconfigured: PUBLIC_RELAY_PATH is not set");
   }
+  if (PUBLIC_RELAY_PATH === "/") {
+    res.statusCode = 500;
+    return res.end("Misconfigured: PUBLIC_RELAY_PATH cannot be '/'");
+  }
 
   try {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `https://${host}`);
+
     const normalizedPath = normalizeIncomingPath(url.pathname);
 
     if (!isAllowedRelayPath(normalizedPath, PUBLIC_RELAY_PATH)) {
       res.statusCode = 404;
       return res.end("Not Found");
     }
-
     const upstreamPath = mapPublicPathToRelayPath(normalizedPath, PUBLIC_RELAY_PATH, RELAY_PATH);
 
     if (!ALLOWED_METHODS.has(req.method)) {
@@ -76,14 +84,4 @@ async function handler(req, res) {
     }
 
     if (!tryAcquireSlot()) {
-      res.statusCode = 503;
-      res.setHeader("retry-after", "1");
-      return res.end("Server Busy: Too Many Inflight Requests");
-    }
-    slotAcquired = true;
-
-    const targetUrl = `${TARGET_BASE}${upstreamPath}${url.search || ""}`;
-
-    const headers = {};
-    const clientIp = toHeaderValue(req.headers["x-real-ip"] || req.headers["x-forwarded-for"]);
-    for (const key of Object.keys(req.headers
+      res
