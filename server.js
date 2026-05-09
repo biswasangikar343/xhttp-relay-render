@@ -54,4 +54,36 @@ async function handler(req, res) {
     const url = new URL(req.url || "/", `https://${host}`);
     const normalizedPath = normalizeIncomingPath(url.pathname);
 
-    if (!isAllowedRelayPath(normalizedPath, PUBLIC_RELAY_PATH))
+    if (!isAllowedRelayPath(normalizedPath, PUBLIC_RELAY_PATH)) {
+      res.statusCode = 404;
+      return res.end("Not Found");
+    }
+
+    const upstreamPath = mapPublicPathToRelayPath(normalizedPath, PUBLIC_RELAY_PATH, RELAY_PATH);
+
+    if (!ALLOWED_METHODS.has(req.method)) {
+      res.statusCode = 405;
+      res.setHeader("allow", "GET, HEAD, POST");
+      return res.end("Method Not Allowed");
+    }
+
+    if (RELAY_KEY) {
+      const token = (req.headers["x-relay-key"] || "").toString();
+      if (token !== RELAY_KEY) {
+        res.statusCode = 403;
+        return res.end("Forbidden");
+      }
+    }
+
+    if (!tryAcquireSlot()) {
+      res.statusCode = 503;
+      res.setHeader("retry-after", "1");
+      return res.end("Server Busy: Too Many Inflight Requests");
+    }
+    slotAcquired = true;
+
+    const targetUrl = `${TARGET_BASE}${upstreamPath}${url.search || ""}`;
+
+    const headers = {};
+    const clientIp = toHeaderValue(req.headers["x-real-ip"] || req.headers["x-forwarded-for"]);
+    for (const key of Object.keys(req.headers
